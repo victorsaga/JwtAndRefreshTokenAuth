@@ -17,9 +17,8 @@ namespace JwtAndRefreshTokenAuth
     public class JwtService : IJwtService
     {
         private readonly IConfigService _configService;
-        private const string RefreshTokenName = "RefreshToken";
-        //private const string SubjectName = "Subject";
         private static IDistributedCache _distributedCache;
+        private const string RefreshTokenName = "RefreshToken";
 
         public JwtService(IConfigService configService)
         {
@@ -110,6 +109,7 @@ namespace JwtAndRefreshTokenAuth
                         //check refresh token
                         if (!IsExistsRefreshTokenCache(currentRefreshKey))
                             return newToken;
+
                         //create new token
                         newToken = CreateJwtToken(payloadDic[JwtRegisteredClaimNames.Sub], payloadDic, signKey, expireTime, refreshExpireTime);
 
@@ -125,6 +125,10 @@ namespace JwtAndRefreshTokenAuth
             return newToken;
         }
 
+        /// <summary>
+        /// add in Satatup.cs
+        /// </summary>
+        /// <param name="services"></param>
         public void AddJwtAuthentication(IServiceCollection services)
         {
             services
@@ -183,7 +187,7 @@ namespace JwtAndRefreshTokenAuth
             => _distributedCache.Remove(GetRefreshTokenCacheName(refreshToken));
 
         private string GetRefreshTokenCacheName(string refreshToken)
-            => $"{RefreshTokenName}Cache:{refreshToken}";
+            => $"Cache:{RefreshTokenName}ExpireTime:{refreshToken}";
 
         private DistributedCacheEntryOptions GetdistributedCacheEntryOptions(DateTime expireTime)
             => new DistributedCacheEntryOptions { AbsoluteExpiration = expireTime };

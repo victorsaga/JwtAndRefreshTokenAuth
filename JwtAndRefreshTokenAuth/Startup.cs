@@ -23,7 +23,12 @@ namespace JwtAndRefreshTokenAuth
             services.AddSingleton<IConfigService, ConfigService>();
             services.AddSingleton<IJwtService, JwtService>();
 
-            services.AddDistributedMemoryCache();
+            //services.AddDistributedMemoryCache();
+            services.AddDistributedRedisCache(options =>
+            {
+                options.Configuration = "url:6382,defaultDatabase=4";
+            });
+
             var jwtService = new JwtService(new ConfigService(_config));
             jwtService.AddJwtAuthentication(services);
 
