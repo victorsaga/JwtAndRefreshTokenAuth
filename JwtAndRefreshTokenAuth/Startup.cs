@@ -31,7 +31,6 @@ namespace JwtAndRefreshTokenAuth
             {
                 options.AddPolicy("Permission", policy => policy.Requirements.Add(new PolicyRequirement()));
             })*/
-
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.

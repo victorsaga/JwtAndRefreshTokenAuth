@@ -7,9 +7,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
-using System.IO;
 using System.Linq;
-using System.Runtime.Serialization.Formatters.Binary;
 using System.Security.Claims;
 using System.Text;
 using System.Threading.Tasks;
@@ -20,9 +18,8 @@ namespace JwtAndRefreshTokenAuth
     {
         private readonly IConfigService _configService;
         private const string RefreshTokenName = "RefreshToken";
-        private const string SubjectName = "Subject";
+        //private const string SubjectName = "Subject";
         private static IDistributedCache _distributedCache;
-        //private Dictionary<string, DateTime> refreshTokens = new Dictionary<string, DateTime>();
 
         public JwtService(IConfigService configService)
         {
@@ -48,13 +45,13 @@ namespace JwtAndRefreshTokenAuth
             if (refreshExpireTime != null)
             {
                 var refreshToken = Guid.NewGuid().ToString("N");
-                AppendRefreshTokenDictionary(refreshToken, refreshExpireTime.Value);
+                AddRefreshTokenToCache(refreshToken, refreshExpireTime.Value);
 
-                payload.Add(RefreshTokenName, refreshToken);
+                payload[RefreshTokenName] = refreshToken;
             }
 
+            payload[JwtRegisteredClaimNames.Sub] = userName;
             var claims = payload.Select(x => new Claim(x.Key, x.Value)).ToList();
-            claims.Add(new Claim(JwtRegisteredClaimNames.Sub, userName));
 
             var token = new JwtSecurityToken(
                 claims: claims,
@@ -91,6 +88,7 @@ namespace JwtAndRefreshTokenAuth
             return cp != null;
         }
 
+        private static object LockRefreshTokenCache = new object();
         public string RefreshToken(string token, string signKey, DateTime expireTime, DateTime? refreshExpireTime = null)
         {
             var newToken = "";
@@ -105,23 +103,18 @@ namespace JwtAndRefreshTokenAuth
                 if (payloadDic.ContainsKey(RefreshTokenName))
                 {
                     var currentRefreshKey = payloadDic[RefreshTokenName];
-                    //get from cache
-                    var refreshTokens = GetRefreshTokenDictionary();
-                    if (!refreshTokens.ContainsKey(currentRefreshKey))
-                        return newToken;
 
-                    var currentRefreshExpireTime = refreshTokens[currentRefreshKey];
-                    if (currentRefreshExpireTime != null && currentRefreshExpireTime > DateTime.Now)
+                    //avoid token refresh multiple times
+                    lock (LockRefreshTokenCache)
                     {
-                        payloadDic.Remove(RefreshTokenName);
-                        newToken = CreateJwtToken(payloadDic[SubjectName], payloadDic, signKey, expireTime, refreshExpireTime);
-                        //刪除此次的refresh token & 過期的refresh token
-                        var deleteKeys = refreshTokens.Where(x => x.Key == currentRefreshKey || x.Value <= DateTime.Now).Select(x => x.Key).ToList();
-                        foreach (var item in deleteKeys)
-                            refreshTokens.Remove(item);
+                        //check refresh token
+                        if (!IsExistsRefreshTokenCache(currentRefreshKey))
+                            return newToken;
+                        //create new token
+                        newToken = CreateJwtToken(payloadDic[JwtRegisteredClaimNames.Sub], payloadDic, signKey, expireTime, refreshExpireTime);
 
-                        //update to cache
-                        SetRefreshTokenDictionary(refreshTokens);
+                        //delete current refresh token 
+                        RemoveRefreshTokenCache(currentRefreshKey);
                     }
                 }
             }
@@ -135,7 +128,13 @@ namespace JwtAndRefreshTokenAuth
         public void AddJwtAuthentication(IServiceCollection services)
         {
             services
-              .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)   // 檢查 HTTP Header 的 Authorization 是否有 JWT Bearer Token           
+              .AddAuthentication(s =>
+              {
+                  //添加JWT Scheme
+                  s.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+                  s.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+                  s.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+              })   // 檢查 HTTP Header 的 Authorization 是否有 JWT Bearer Token           
               .AddJwtBearer(options => //JWT驗證的參數
                 {
                     options.TokenValidationParameters = new TokenValidationParameters
@@ -143,6 +142,7 @@ namespace JwtAndRefreshTokenAuth
                         ValidateAudience = false,
                         ValidateIssuer = false,
                         ValidateLifetime = true,
+                        ClockSkew = TimeSpan.Zero, //時間偏移容忍範圍，預設為300秒
                         ValidateIssuerSigningKey = true,
                         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configService.GetJwtKey()))
                     };
@@ -162,7 +162,7 @@ namespace JwtAndRefreshTokenAuth
         {
             var base64Payload = token.Split('.')[1];
             var appendCount = 4 - (base64Payload.Length % 4);
-            if (appendCount > 0)
+            if (appendCount > 0 && appendCount < 4)
                 base64Payload += string.Concat(Enumerable.Repeat('=', appendCount));
 
             byte[] data = Convert.FromBase64String(base64Payload);
@@ -170,55 +170,22 @@ namespace JwtAndRefreshTokenAuth
         }
 
 
-        private static object LockRefreshTokenCache = new object();
 
-        private Dictionary<string, DateTime> GetRefreshTokenDictionary()
-        {
-            lock (LockRefreshTokenCache)
-            {
-                var bytes = _distributedCache.Get(RefreshTokenName + "Cache");
-                return bytes == null
-                                ? new Dictionary<string, DateTime>()
-                                : ByteArrayToObject<Dictionary<string, DateTime>>(bytes);
-            }
-        }
+        private void AddRefreshTokenToCache(string refreshToken, DateTime expireTime)
+            => _distributedCache.SetString(GetRefreshTokenCacheName(refreshToken),
+                                                                            expireTime.ToString(),
+                                                                            GetdistributedCacheEntryOptions(expireTime));
 
-        private void SetRefreshTokenDictionary(Dictionary<string, DateTime> refreshToken)
-        {
-            lock (LockRefreshTokenCache)
-                _distributedCache.Set(RefreshTokenName + "Cache", ObjectToByteArray(refreshToken));
-        }
+        private bool IsExistsRefreshTokenCache(string refreshToken)
+            => !string.IsNullOrEmpty(_distributedCache.GetString(GetRefreshTokenCacheName(refreshToken)));
 
-        private void AppendRefreshTokenDictionary(string key, DateTime value)
-        {
-            lock (LockRefreshTokenCache)
-            {
-                var dic = GetRefreshTokenDictionary();
-                dic.Add(key, value);
-                SetRefreshTokenDictionary(dic);
-            }
-        }
+        private void RemoveRefreshTokenCache(string refreshToken)
+            => _distributedCache.Remove(GetRefreshTokenCacheName(refreshToken));
 
-        private byte[] ObjectToByteArray(object obj)
-        {
-            var binaryFormatter = new BinaryFormatter();
-            using (var memoryStream = new MemoryStream())
-            {
-                binaryFormatter.Serialize(memoryStream, obj);
-                return memoryStream.ToArray();
-            }
-        }
+        private string GetRefreshTokenCacheName(string refreshToken)
+            => $"{RefreshTokenName}Cache:{refreshToken}";
 
-        private T ByteArrayToObject<T>(byte[] bytes)
-        {
-            using (var memoryStream = new MemoryStream())
-            {
-                var binaryFormatter = new BinaryFormatter();
-                memoryStream.Write(bytes, 0, bytes.Length);
-                memoryStream.Seek(0, SeekOrigin.Begin);
-                var obj = binaryFormatter.Deserialize(memoryStream);
-                return (T)obj;
-            }
-        }
+        private DistributedCacheEntryOptions GetdistributedCacheEntryOptions(DateTime expireTime)
+            => new DistributedCacheEntryOptions { AbsoluteExpiration = expireTime };
     }
 }

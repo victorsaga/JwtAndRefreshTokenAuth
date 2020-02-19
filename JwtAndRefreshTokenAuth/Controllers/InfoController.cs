@@ -15,9 +15,16 @@ namespace JwtAndRefreshTokenAuth.Controllers
         }
 
         [Authorize]
-        //[AllowAnonymous]
         [HttpGet("GetExpireTime")]
         public int GetExpireTime()
+        {
+            return _configService.GetJwtExpireTimeMinutes();
+        }
+
+
+        [AllowAnonymous]
+        [HttpGet("GetExpireTime2")]
+        public int GetExpireTime2()
         {
             return _configService.GetJwtExpireTimeMinutes();
         }
